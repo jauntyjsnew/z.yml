@@ -1,4 +1,4 @@
-name: Z
+name: R
 
 on:
   workflow_dispatch:
@@ -180,6 +180,25 @@ jobs:
           echo "version=$NODE_VER" >> $GITHUB_OUTPUT
           echo "capacitor_major=$MAJOR_VER" >> $GITHUB_OUTPUT
       
+      - name: Detect
+        id: features
+        working-directory: app
+        run: |
+          HAS_RUST="false"
+          RUST_ENGINE_DIR=""
+          WASM_OUT_DIR=""
+          if [ -d "rust" ]; then
+            RUST_ENGINE_DIR=$(find rust -maxdepth 1 -type d ! -name rust | head -1)
+            if [ -n "$RUST_ENGINE_DIR" ] && [ -f "$RUST_ENGINE_DIR/Cargo.toml" ]; then
+              HAS_RUST="true"
+              ENGINE_NAME=$(basename "$RUST_ENGINE_DIR" | sed 's/-wasm-engine//')
+              WASM_OUT_DIR="src/wasm/${ENGINE_NAME}-engine"
+            fi
+          fi
+          echo "has_rust=$HAS_RUST" >> $GITHUB_OUTPUT
+          echo "rust_engine_dir=$RUST_ENGINE_DIR" >> $GITHUB_OUTPUT
+          echo "wasm_out_dir=$WASM_OUT_DIR" >> $GITHUB_OUTPUT
+      
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ steps.node_version.outputs.version }}
@@ -200,6 +219,44 @@ jobs:
             }
           else
             npm install --legacy-peer-deps
+          fi
+      
+      - name: Cargo Cache
+        if: steps.features.outputs.has_rust == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            app/${{ steps.features.outputs.rust_engine_dir }}/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('app/**/Cargo.lock', 'app/**/Cargo.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+      
+      - name: Rust
+        if: steps.features.outputs.has_rust == 'true'
+        run: |
+          if command -v rustc &>/dev/null && command -v wasm-pack &>/dev/null; then
+            rustc --version
+            wasm-pack --version
+          else
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            source $HOME/.cargo/env
+            cargo install wasm-pack
+          fi
+
+      - name: WASM
+        if: steps.features.outputs.has_rust == 'true'
+        working-directory: app
+        run: |
+          source $HOME/.cargo/env
+          RUST_DIR="${{ steps.features.outputs.rust_engine_dir }}"
+          WASM_OUT="${{ steps.features.outputs.wasm_out_dir }}"
+          if [ -f "$RUST_DIR/Makefile" ]; then
+            make -C "$RUST_DIR" build
+          else
+            wasm-pack build "$RUST_DIR" --target web --out-dir "../../$WASM_OUT" --release
           fi
       
       - name: Build
@@ -445,6 +502,12 @@ jobs:
       
       - name: Cert
         id: cert
+        env:
+          CERT_B64: ${{ steps.apple.outputs.certificate_base64 }}
+          CERT_PASS: ${{ steps.apple.outputs.certificate_password }}
+          INST_CERT_B64: ${{ steps.apple.outputs.installer_certificate_base64 }}
+          INST_CERT_PASS: ${{ steps.apple.outputs.installer_certificate_password }}
+          APPLE_TEAM_ID: ${{ steps.apple.outputs.team_id }}
         run: |
           CERT_PATH=$RUNNER_TEMP/cert.p12
           INSTALLER_CERT_PATH=$RUNNER_TEMP/installer_cert.p12
@@ -452,23 +515,22 @@ jobs:
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
           echo "::add-mask::$KEYCHAIN_PASSWORD"
           
-          echo "${{ steps.apple.outputs.certificate_base64 }}" | base64 --decode > $CERT_PATH
+          echo "$CERT_B64" | base64 --decode > $CERT_PATH
           
           security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          security import $CERT_PATH -P "${{ steps.apple.outputs.certificate_password }}" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security import $CERT_PATH -P "$CERT_PASS" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
           
           INSTALLER_CERT_NAME=""
-          INST_B64="${{ steps.apple.outputs.installer_certificate_base64 }}"
-          if [ -n "$INST_B64" ]; then
-            echo "$INST_B64" | base64 --decode > $INSTALLER_CERT_PATH
-            security import $INSTALLER_CERT_PATH -P "${{ steps.apple.outputs.installer_certificate_password }}" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          if [ -n "$INST_CERT_B64" ]; then
+            echo "$INST_CERT_B64" | base64 --decode > $INSTALLER_CERT_PATH
+            security import $INSTALLER_CERT_PATH -P "$INST_CERT_PASS" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
             INSTALLER_CERT_NAME=$(security find-identity -v -p basic $KEYCHAIN_PATH | grep "3rd Party Mac Developer Installer" | head -1 | sed 's/.*"\(.*\)".*/\1/')
             if [ -n "$INSTALLER_CERT_NAME" ]; then
               echo "::add-mask::$INSTALLER_CERT_NAME"
             else
-              INSTALLER_CERT_NAME="3rd Party Mac Developer Installer: ${{ steps.apple.outputs.team_id }}"
+              INSTALLER_CERT_NAME="3rd Party Mac Developer Installer: $APPLE_TEAM_ID"
             fi
           fi
           
