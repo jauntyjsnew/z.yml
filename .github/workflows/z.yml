@@ -263,6 +263,39 @@ jobs:
         working-directory: app
         run: ${{ inputs.npm_build_command }}
       
+      - name: Rust Engine
+        working-directory: app
+        run: |
+          # Check if this project has a rust-engine directory
+          if [ ! -d "rust-engine" ]; then
+            echo "No rust-engine found, skipping"
+            exit 0
+          fi
+          
+          # Ensure Rust is installed
+          if ! command -v rustc &>/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          fi
+          source $HOME/.cargo/env || true
+          
+          # Add all required targets
+          rustup target add aarch64-apple-ios
+          rustup target add aarch64-apple-ios-sim
+          rustup target add x86_64-apple-ios
+          
+          # Add Mac Catalyst targets if needed
+          if [ "${{ inputs.target_platform }}" == "all_devices" ] || [ "${{ inputs.target_platform }}" == "macos_only" ]; then
+            rustup target add aarch64-apple-ios-macabi
+            rustup target add x86_64-apple-ios-macabi
+          fi
+          
+          # Install cbindgen if not present
+          if ! command -v cbindgen &>/dev/null; then
+            cargo install cbindgen
+          fi
+          
+          rustc --version
+          echo "Rust targets ready"
       - name: Sync
         working-directory: app
         env:
